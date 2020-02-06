@@ -7,7 +7,21 @@ Socket::Socket()
     protocol = -1;
 }
 
-void Socket::load_socket(int f, sockaddr_in *src_addr) {
+int Socket::stop_socket()
+{
+    int res = 0;
+    if (stage == SOCKET_STAGE::RUNNED) {
+        std::cout << "[Socket::internal_stop_socket]\n";
+//        res = shutdown (fd, SHUT_RDWR);
+        res = close (fd);
+    }
+
+    fd = -1;
+    stage = SOCKET_STAGE::DATA_SAVED;
+    return res;
+}
+
+void Socket::load_socket(int f, SOCKET_TYPE t, sockaddr_in *src_addr) {
     if (stage == SOCKET_STAGE::UNDEFINED) {
         fd = f;
         if (src_addr) {
@@ -15,6 +29,7 @@ void Socket::load_socket(int f, sockaddr_in *src_addr) {
         }
         protocol = -1;
         stage = SOCKET_STAGE::RUNNED;
+        type = t;
     }
 }
 
@@ -57,26 +72,7 @@ int Socket::create_socket()
     return 0;
 }
 
-int Socket::internal_stop_socket()
-{
-    int res = 0;
-    if (stage == SOCKET_STAGE::RUNNED) {
-        std::cout << "[Socket::internal_stop_socket]\n";
-//        res = shutdown (fd, SHUT_RDWR);
-        res = close (fd);
-    }
-
-    fd = -1;
-    stage = SOCKET_STAGE::DATA_SAVED;
-    return res;
-}
-
 int Socket::get_fd () const
 {
     return fd;
-}
-
-Socket::operator addr_entry() const
-{
-    return {ntohl (addr.sin_addr.s_addr), ntohs (addr.sin_port)};
 }

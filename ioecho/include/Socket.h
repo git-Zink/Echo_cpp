@@ -1,6 +1,11 @@
 #ifndef SOCKET_H
 #define SOCKET_H
 
+#include <Data_Container.h>
+
+#include <types.h>
+#include <memory>
+#include <iostream>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -17,9 +22,6 @@
 
 #include <iostream>
 
-#include <types.h>
-#include <memory>
-
 enum class SOCKET_STAGE {
     UNDEFINED,
     DATA_SAVED, // = CLOSED
@@ -27,38 +29,43 @@ enum class SOCKET_STAGE {
     RUNNED
 };
 
+enum class SOCKET_TYPE {
+    SERVER,
+    CLIENT,
+    OTHER
+};
+
 using addr_entry = std::pair <in_addr_t, unsigned short>;
 
 class Socket
 {
 protected:
-    int protocol;
-    struct sockaddr_in addr;
-
-    SOCKET_STAGE stage;
-
     int fd;
+    struct sockaddr_in addr;
+    int protocol;
 
+    SOCKET_TYPE type;
+    SOCKET_STAGE stage;
+    
     int internal_save_data (const char *ip, in_port_t port, int proto);
     virtual int create_socket () final;
-    int internal_stop_socket ();
 
 public:
     Socket();
     virtual ~Socket() = default;
 
-    virtual void load_socket (int f, struct sockaddr_in *src_addr = nullptr) final;
-
     virtual int save_data (const char *ip, in_port_t port) = 0;
-    virtual int run_socket () = 0;
-    virtual int stop_socket () = 0;
+    virtual int run_as_server () = 0;
+    virtual int run_as_client () = 0;
+    virtual int stop_socket () final;
+    
+    virtual void load_socket (int f, SOCKET_TYPE t, struct sockaddr_in *src_addr = nullptr) final;
+    
+    int get_fd() const;
 
-    virtual int get_fd () const final;
 
-    virtual ECHO_SOCKET_ACTION handle_incoming_data (std::unique_ptr<Socket>& src_sock, char *buf, size_t& len) = 0;
-    virtual int write_into_socket (const char *buf, size_t size) = 0;
-
-    explicit operator addr_entry() const;
+    virtual ECHO_RET_CODE handle_incoming_data (std::unique_ptr<Socket>& src_sock, std::shared_ptr<Data_Container>& throwing_data) = 0;
+    virtual ECHO_RET_CODE write_into_socket (std::shared_ptr<Data_Container> outcome_data) = 0;
 };
 
 #endif // SOCKET_H

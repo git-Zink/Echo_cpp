@@ -1,18 +1,25 @@
 #include "File_Socket.h"
 
-ECHO_SOCKET_ACTION File_Socket::handle_incoming_data(std::unique_ptr<Socket> &src_sock, char *buf, size_t &len)
+File_Socket::File_Socket()
+{
+    input_data.reset (new Data_Container);
+}
+
+ECHO_RET_CODE File_Socket::handle_incoming_data(std::unique_ptr<Socket> &src_sock, std::shared_ptr<Data_Container> &throwing_data)
 {
     ssize_t rr;
-    rr = read (fd, buf, len);
-
+    rr = read (fd, input_data->pool, input_data->get_size_to_read());
     if (rr == -1 && errno == EINTR) {
-        return ECHO_SOCKET_ACTION::KEEP_TRYING;
+        return ECHO_RET_CODE::IN_PROGRESS;
     }
 
     if (rr == -1 || rr == 0) {
-        return ECHO_SOCKET_ACTION::DELETE_SOCKET;
+        return ECHO_RET_CODE::CLOSE;
     }
 
-    len = static_cast<size_t> (rr);
-    return ECHO_SOCKET_ACTION::ONE_SHOOT_ACTION;
+    input_data->actual_size += static_cast<size_t> (rr);
+    std::cout << "[File_Socket::handle_incoming_data] read " << input_data->actual_size << " bytes\n";
+    throwing_data = input_data;
+    src_sock.reset (nullptr);
+    return ECHO_RET_CODE::OK;
 }

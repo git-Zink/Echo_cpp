@@ -1,10 +1,12 @@
 #include <Server.h>
-#include <Client_TCP_Socket.h>
+#include <TCP_Socket.h>
+#include <UDP_Socket.h>
+
 #include <set>
 
 uint8_t Server::need_stop;
 
-void work_with_numbers (const char *str, size_t size)
+void work_with_numbers (std::shared_ptr<Data_Container>& data)
 {
     static std::map <char, uint8_t> values {
         {'0', 0},
@@ -22,8 +24,8 @@ void work_with_numbers (const char *str, size_t size)
     std::multiset <int> numbers;
     int sum = 0;
 
-    for (size_t i = 0; i < size; ++i) {
-        auto find = values.find(str[i]);
+    for (size_t i = data->header_size; i < data->actual_size; ++i) {
+        auto find = values.find(data->pool[i]);
         if (find != values.end()) {
             numbers.insert(find->second);
             sum += find->second;
@@ -57,45 +59,19 @@ void Server::sync_two_lists ()
     auto iter = sock_list.begin();
 
     for (; i < sock_list.size(); ++i, ++iter) {
-        if (poll_list[i].fd != (*iter)->get_fd()) {
-            poll_list[i].fd = (*iter)->get_fd();
+        if (poll_list[i].fd != iter->sock->get_fd()) {
+            poll_list[i].fd = iter->sock->get_fd();
             poll_list[i].events = POLLIN;
         }
     }
 }
 
-void Server::remove_socket(sock_list_iter iter)
+void Server::remove_socket(list_iter_t iter)
 {
-    sock_list.erase (iter);
-}
-
-void Server::handle_server_tcp_data(std::unique_ptr<Socket>& sock)
-{
-    sock_list.emplace_back (sock.release());
-}
-
-void Server::handle_server_udp_data(std::unique_ptr<Socket>& sock, char *buf, size_t len, bool is_last)
-{
-    if (!is_last) {
-        saved_data [static_cast<addr_entry>(*sock)].append(buf, len);
+    if (iter->is_temporary) {
+        std::cout << "[Server::remove_socket] erase socket\n";
+        sock_list.erase (iter);
     }
-    else {
-        auto iter = &saved_data [static_cast<addr_entry>(*sock)];
-
-        iter->append(buf, len);
-        work_with_numbers (iter->c_str(), iter->length());
-        sock->write_into_socket(iter->c_str(), iter->length());
-
-        saved_data.erase(static_cast<addr_entry>(*sock));
-    }
-}
-
-void Server::handle_client_tcp_data(sock_list_iter iter, char *buf, size_t len)
-{
-    work_with_numbers (buf, len);
-    (*iter)->write_into_socket(buf, len);
-    (*iter)->stop_socket();
-    remove_socket (iter);
 }
 
 void Server::signal_handle(int signal)
@@ -107,14 +83,14 @@ void Server::signal_handle(int signal)
 
 int Server::make_socket (const char *ip, in_port_t port)
 {
-    sock_list.emplace_back (new Server_TCP_socket);
-    if (sock_list.back()->save_data (ip, port) != 0) {
+    sock_list.emplace_back (list_node_t(new TCP_socket, false));
+    if (sock_list.back().sock->save_data (ip, port) != 0) {
         std::cerr << "[Server::make_socket] fail create tcp socket\n";
         return 1;
     }
 
-    sock_list.emplace_back (new Server_UDP_socket);
-    if (sock_list.back()->save_data (ip, port) != 0) {
+    sock_list.emplace_back (list_node_t(new UDP_socket, false));
+    if (sock_list.back().sock->save_data (ip, port) != 0) {
         std::cerr << "[Server::make_socket] fail create udp socket\n";
         return 2;
     }
@@ -127,12 +103,12 @@ int Server::do_routine ()
     struct pollfd poll_item;
     
     for (auto &iter : sock_list) {
-        if (iter->run_socket() != 0) {
-            std::cerr << "[Server::do_routine] run_socket failed. skip\n";
+        if (iter.sock->run_as_server() != 0) {
+            std::cerr << "[Server::do_routine] run_as_server failed. skip\n";
             continue;
         }
 
-        poll_item.fd = iter->get_fd();
+        poll_item.fd = iter.sock->get_fd();
         poll_item.events = POLLIN;
 
         poll_list.push_back (poll_item);
@@ -155,47 +131,78 @@ int Server::do_routine ()
             break;
         }
 
-        auto sock_iter = sock_list.begin();
-        for (size_t i = 0; i < poll_list.size(); ++i, ++sock_iter) {
+        auto list_iter = sock_list.begin();
+        auto remove_iter = sock_list.end();
+        
+        for (size_t i = 0; i < poll_list.size(); ++i, ++list_iter) {
+            
+            if (remove_iter != sock_list.end()) {
+                remove_socket(remove_iter);
+                remove_iter = sock_list.end();
+            }
+            
+            if ((poll_list[i].events & POLLOUT) && (poll_list[i].revents & POLLOUT)) {
+                switch (list_iter->sock->write_into_socket(nullptr)) {
+                case ECHO_RET_CODE::OK:
+                    poll_list[i].events = POLLIN;
+                    break;
+                    
+                case ECHO_RET_CODE::IN_PROGRESS:
+                    //nothing
+                    break;
+                    
+                default:
+                    remove_iter = list_iter;
+                };
+            }
+            
             if ((poll_list[i].revents & POLLIN) != 0) {
 
                 std::unique_ptr<Socket> sock_arg;
-                size_t rr = buffer_size - 1;
-
-                switch ((*sock_iter)->handle_incoming_data(sock_arg, buffer, rr)) {
-                case ECHO_SOCKET_ACTION::NONE:
-                case ECHO_SOCKET_ACTION::KEEP_TRYING:
-                    //server socket error = ignore OR EAGAIN + EWOULDBLOCK
+                std::shared_ptr<Data_Container> data;
+                
+                switch (list_iter->sock->handle_incoming_data (sock_arg, data)) {
+                case ECHO_RET_CODE::NEW:
+                    sock_list.emplace_back (list_node_t{sock_arg.release(), true});
                     break;
 
-                case ECHO_SOCKET_ACTION::ADD_NEW_SOCKET:
-                    handle_server_tcp_data (sock_arg);
+                case ECHO_RET_CODE::OK:
+                    std::cout << "[Server::do_routine] ECHO_RET_CODE::OK\n";
+                    work_with_numbers (data);
+                    if (sock_arg != nullptr) {
+                        sock_arg->write_into_socket(data);
+                        data->reset();
+                    }
+                    else {
+                        poll_list[i].events = POLLOUT;
+                    }
+                    break;
+                    
+                case ECHO_RET_CODE::IN_PROGRESS:
+                    std::cout << "[Server::do_routine] in progress. keep waiting\n";
+                    break;
+                    
+                case ECHO_RET_CODE::FAIL:
+                    //oops, but do nothing
                     break;
 
-                case ECHO_SOCKET_ACTION::ONE_SHOOT_ACTION:
-                    handle_client_tcp_data (sock_iter, buffer, rr);
+                case ECHO_RET_CODE::CLOSE:
+                    remove_iter = list_iter;
                     break;
-
-                case ECHO_SOCKET_ACTION::SAVE_SOCKET_AND_DATA:
-                    handle_server_udp_data (sock_arg, buffer, rr, false);
-                    break;
-
-                case ECHO_SOCKET_ACTION::ANSWER_AND_DELETE:
-                    handle_server_udp_data (sock_arg, buffer, rr, true);
-                    break;
-
-                case ECHO_SOCKET_ACTION::DELETE_SOCKET:
-                    remove_socket (sock_iter);
-                    break;
-                };
+                }
             }
+        }
+        
+        if (remove_iter != sock_list.end()) {
+            remove_socket(remove_iter);
+            remove_iter = sock_list.end();
         }
 
         sync_two_lists ();
     }
     
-    for (auto &iter : sock_list) {
-        iter->stop_socket();
+    for (auto& iter : sock_list) {
+        iter.sock->stop_socket();
     }
     
     return 0;

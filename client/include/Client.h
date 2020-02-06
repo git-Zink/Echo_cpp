@@ -1,8 +1,8 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
-#include <Client_TCP_Socket.h>
-#include <Client_UDP_Socket.h>
+#include <TCP_Socket.h>
+#include <UDP_Socket.h>
 
 #include <string>
 #include <poll.h>
@@ -32,12 +32,7 @@ private:
     struct pollfd plfds [poll_total];
 
 
-    static constexpr size_t buffer_size = 70000;
-
-    char in_buf [buffer_size];
-    size_t read_len;
-
-    char srv_buf [buffer_size];
+    std::shared_ptr <Data_Container> p_data;
 
     void wait_first_console_input ();
     void wait_server_output ();

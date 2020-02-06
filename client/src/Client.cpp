@@ -44,9 +44,9 @@ void Client::signal_handle(int signal)
 int Client::make_socket(const char *ip, unsigned short port, ECHO_PROTO proto)
 {
     input_sock.reset (new File_Socket);
-    input_sock->load_socket(STDIN_FILENO);
+    input_sock->load_socket(STDIN_FILENO, SOCKET_TYPE::OTHER);
 
-    (proto == ECHO_PROTO::UDP) ? srv_sock.reset (new Client_UDP_socket) : srv_sock.reset (new Client_TCP_socket);
+    (proto == ECHO_PROTO::UDP) ? srv_sock.reset (new UDP_socket) : srv_sock.reset (new TCP_socket);
 
     if (srv_sock->save_data (ip, port) != 0) {
         std::cerr << "[Client::make_socket] failed create sockadd\n";
@@ -80,15 +80,12 @@ int Client::do_routine()
         }
 
         if (plfds[poll_input].revents & POLLIN) {
-            read_len = buffer_size - 1;
-
-            switch (input_sock->handle_incoming_data (dummy, in_buf, read_len)) {
-
-            case ECHO_SOCKET_ACTION::KEEP_TRYING:
+            switch (input_sock->handle_incoming_data (dummy, p_data)) {
+            case ECHO_RET_CODE::IN_PROGRESS:
                 continue;
 
-            case ECHO_SOCKET_ACTION::ONE_SHOOT_ACTION:
-                if (srv_sock->run_socket() != 0) {
+            case ECHO_RET_CODE::OK:
+                if (srv_sock->run_as_client() != 0) {
                     srv_sock->stop_socket();
                     std::cerr << "[Client::do_routine] run_socket failed\n";
                     continue;
@@ -110,52 +107,49 @@ int Client::do_routine()
         }
 
         if (plfds[poll_srv].revents & POLLOUT) {
-            if (read_len != 0) {
-                if (srv_sock->write_into_socket (in_buf, read_len) != 0) {
+            if (p_data->actual_size != 0) {
+                switch (srv_sock->write_into_socket (p_data)) {
+                case ECHO_RET_CODE::OK:
+                    std::cerr << "[Client::do_routine] write_into_socket OK\n";
+                    wait_server_input();
+                    p_data->reset();
+                    break;
+                    
+                case ECHO_RET_CODE::IN_PROGRESS:
+                    std::cerr << "[Client::do_routine] write_into_socket IN_PROGRESS\n";
+                    //nothing
+                    break;
+                    
+                default:
                     std::cerr << "[Client::do_routine] write_into_socket failed\n";
                     /* close and rest */
                     srv_sock->stop_socket();
                     wait_console_input ();
-                }
-                wait_server_input();
-                read_len = 0;
+                };
             }
         }
 
         if (plfds[poll_srv].revents & POLLIN) {
-            size_t srv_len = buffer_size - 1;
-            switch (srv_sock->handle_incoming_data(dummy, srv_buf, srv_len)) {
-            case ECHO_SOCKET_ACTION::ONE_SHOOT_ACTION:
-                //tcp
-                srv_buf [srv_len] = 0;
-                std::cout << "[Client::do_routine] recv from server " << srv_len << " bytes : " << srv_buf << "\n";
-                //tcp wil be closed by server, udp isn't require closing
+            switch (srv_sock->handle_incoming_data(dummy, p_data)) {
+            case ECHO_RET_CODE::IN_PROGRESS:
+                std::cout << "[Client::do_rountine] IN_PROGRESS\n";
                 break;
 
-            case ECHO_SOCKET_ACTION::SAVE_SOCKET_AND_DATA:
-                //udp
-                srv_buf [srv_len] = 0;
-//                std::cout << "[Client::do_routine] recv from server " << srv_len << " bytes : " << srv_buf << "\n";
+            case ECHO_RET_CODE::OK:
+                std::cout << "[Client::do_rountine] OK\n";
+                p_data->pool [p_data->actual_size] = 0;
+                std::cout << "[Client::do_rountine] get server answer " << p_data->actual_size - p_data->header_size << " bytes\n";
+                p_data->reset();
                 break;
 
-            case ECHO_SOCKET_ACTION::ANSWER_AND_DELETE:
-                //last udp
-                srv_buf [srv_len] = 0;
-//                std::cout << "[Client::do_routine] recv last from server " << srv_len << " bytes : " << srv_buf << "\n";
-
-                srv_sock->stop_socket();
-                wait_console_input ();
-                break;
-
-            case ECHO_SOCKET_ACTION::DELETE_SOCKET:
-                //tcp
-                std::cout << "[Client::do_routine] server close connection\n";
+            case ECHO_RET_CODE::CLOSE:
+                std::cout << "[Client::do_rountine] socket was closed\n";
                 srv_sock->stop_socket();
                 wait_console_input ();
                 break;
 
             default:
-                break;
+                std::cerr << "[Client::do_rountine] strange error\n";
             };
         }
     }while (!need_stop);
